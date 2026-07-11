@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "synchronicity-core"
+version = "0.1.0"
+description = "Energy-based incentive fields for multi-agent economic coordination"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Kevin Hill", email = "kivo360@gmail.com" }]
+dependencies = [
+    "networkx>=3.2,<4",
+    "matplotlib>=3.8,<4",
+    "numpy>=1.26,<3",
+    "scipy>=1.11,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-cov>=4.0,<6",
+]
+
+[tool.setuptools.packages.find]
+include = ["synchronicity*"]
