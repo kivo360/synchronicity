@@ -281,6 +281,41 @@ class PlannerSystem:
         self.mode = mode
         self.sigma_tracker = sigma_tracker
 
+    def _score_assignment(self, agent, task_id: str, energy: float,
+                          snapshot: FieldSnapshot) -> float:
+        """Score the value of assigning an agent to a task.
+
+        In 'energy' mode: score = energy × base_efficiency (myopic)
+        In 'sigma' mode:  score = energy × σ_chain (composition rule)
+        In 'lookahead' mode: score = σ_chain × (energy + expected_downstream_energy)
+        """
+        if self.mode == "lookahead" and self.sigma_tracker:
+            # Multi-horizon: score includes expected downstream energy
+            # that will be unlocked by completing this task.
+            # This is a 2-tick lookahead: what energy arrives downstream
+            # if I complete this task now?
+            sigma_chain = self.sigma_tracker.chain_sigma(
+                agent.id, task_id, self.chain, snapshot, max_depth=3,
+            )
+
+            # Estimate downstream energy that will be unlocked
+            downstream_energy = 0.0
+            for ds_id, coeff in snapshot.downstream.get(task_id, []):
+                ds_energy = snapshot.task_energy.get(ds_id, 0.0)
+                # Energy arriving downstream = propagated fraction of current task energy
+                downstream_energy += energy * coeff * sigma_chain * 0.3  # propagation factor
+
+            return (energy + downstream_energy) * sigma_chain
+
+        elif self.mode == "sigma" and self.sigma_tracker:
+            sigma_chain = self.sigma_tracker.chain_sigma(
+                agent.id, task_id, self.chain, snapshot, max_depth=3,
+            )
+            return energy * sigma_chain
+
+        else:
+            return energy * agent.capability.base_efficiency
+
     def assign(
         self,
         agents: list[PlannerAgent],
@@ -309,16 +344,10 @@ class PlannerSystem:
 
                 if caps and not caps.intersection(agent.capability.capabilities):
                     cost_matrix[i][j] = 0  # can't do it
-                elif self.mode == "sigma" and self.sigma_tracker:
-                    # σ-aware scoring: value = energy × σ_chain
-                    # Uses the composition rule for downstream potential
-                    sigma_chain = self.sigma_tracker.chain_sigma(
-                        agent.id, task_id, self.chain, snapshot, max_depth=3,
-                    )
-                    cost_matrix[i][j] = energy * sigma_chain
                 else:
-                    # Original myopic scoring
-                    cost_matrix[i][j] = energy * agent.capability.base_efficiency
+                    cost_matrix[i][j] = self._score_assignment(
+                        agent, task_id, energy, snapshot,
+                    )
 
         # Solve (minimize negative = maximize positive)
         row_ind, col_ind = linear_sum_assignment(-cost_matrix)

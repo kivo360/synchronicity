@@ -187,7 +187,7 @@ class Simulation:
         self.planner: Optional[PlannerSystem] = None
 
         if config.mechanism == MechanismType.PLANNER:
-            planner_mode = "sigma" if use_sigma else "energy"
+            planner_mode = "lookahead" if use_sigma else "energy"
             self.planner = PlannerSystem(
                 chain, mode=planner_mode, sigma_tracker=self.sigma_tracker,
             )

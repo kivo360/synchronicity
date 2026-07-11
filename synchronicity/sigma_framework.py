@@ -290,29 +290,84 @@ def build_task_complexities(
 ) -> dict[str, TaskComplexity]:
     """Build complexity estimates for all tasks in a value chain.
 
-    If process-mining stats are available, use outcome distributions.
-    Otherwise, estimate from capability requirements and topology.
+    Complexity H(p) should vary per task — it's the intrinsic information
+    content, which depends on:
+      - Topology position (source tasks are simpler, mid-chain harder,
+        branching nodes hardest because they have more possible outcomes)
+      - Capacity constraints (tight capacity = higher stakes = more entropy)
+      - Capability rarity (tasks requiring rare skills are harder)
+      - Process-mining data (duration variance, variant count)
+
+    The key fix: tasks in the same chain now have DIFFERENT H(p), which
+    means σ = H(p)/H(p,q) varies even when agents have similar H(p,q).
     """
     complexities = {}
 
+    # Compute topology-based complexity modifiers
+    max_downstream = max(
+        (len(chain.downstream(tid)) for tid in chain.all_task_ids()),
+        default=1,
+    )
+    max_upstream = max(
+        (len(chain.upstream(tid)) for tid in chain.all_task_ids()),
+        default=1,
+    )
+
+    # Find max capacity for normalization
+    max_capacity = max(
+        (t.energy_capacity for t in chain.tasks.values()),
+        default=100.0,
+    )
+
     for task_id, task in chain.tasks.items():
-        # Start with capability-based estimate
+        # Base complexity from capability count
         n_caps = len(task.required_capabilities) if task.required_capabilities else 0
 
-        if stats:
-            # Use process-mining data if available
-            freq = stats.get(task_id, {}).get("frequency", 1)
-            avg_duration = stats.get(task_id, {}).get("avg_duration_seconds", 3600)
+        # ── Topology position ────────────────────────────────
+        # Branching nodes (multiple downstream) have higher entropy —
+        # more possible outcomes, more uncertainty about which path energy takes.
+        n_downstream = len(chain.downstream(task_id))
+        branching_factor = n_downstream / max(max_downstream, 1)
 
-            # Complexity heuristic: low-frequency + high-duration = complex
-            # High-frequency + low-duration = simple
+        # Convergence nodes (multiple upstream) — energy arrives from
+        # multiple sources, creating synchronization uncertainty
+        n_upstream = len(chain.upstream(task_id))
+        convergence_factor = n_upstream / max(max_upstream, 1)
+
+        # ── Capacity tightness ───────────────────────────────
+        # Tight capacity = higher stakes = more information needed to
+        # decide whether to attempt (overflow risk)
+        capacity_tightness = 1.0 - (task.energy_capacity / max_capacity)
+
+        if stats:
+            # Process-mining data available — use it
+            task_stats = stats.get(task_id, {})
+            freq = task_stats.get("frequency", 1)
+            avg_duration = task_stats.get("avg_duration_seconds", 3600)
+
             duration_factor = min(math.log(1 + avg_duration / 3600), 1.0)
             freq_factor = 1.0 / (1.0 + math.log(1 + freq))
-            h_p = 0.3 + 0.3 * duration_factor + 0.2 * freq_factor + 0.05 * n_caps
-            h_p = min(h_p, 0.9)
+
+            h_p = (
+                0.15                           # base
+                + 0.20 * branching_factor       # branching entropy
+                + 0.15 * convergence_factor     # convergence entropy
+                + 0.15 * capacity_tightness     # capacity stakes
+                + 0.15 * duration_factor        # duration complexity
+                + 0.10 * freq_factor            # rarity
+                + 0.05 * n_caps                 # capability complexity
+            )
         else:
-            # No stats — use capability-based heuristic
-            h_p = min(0.3 + 0.1 * n_caps, 0.8)
+            # No process-mining data — topology + capacity only
+            h_p = (
+                0.15                           # base
+                + 0.25 * branching_factor       # branching entropy
+                + 0.20 * convergence_factor     # convergence entropy
+                + 0.25 * capacity_tightness     # capacity stakes
+                + 0.10 * n_caps                 # capability complexity
+            )
+
+        h_p = max(0.05, min(h_p, 0.95))
 
         complexities[task_id] = TaskComplexity(
             task_id=task_id,
