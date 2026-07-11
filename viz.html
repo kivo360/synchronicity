@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synchronicity — Energy Field Simulation</title>
+<style>
+:root {
+  --bg: #0a0e17;
+  --panel: #121828;
+  --border: #1e2740;
+  --accent-gold: #d4a017;
+  --accent-green: #00d09c;
+  --accent-red: #ff4d6d;
+  --accent-blue: #4ea8de;
+  --accent-purple: #b388ff;
+  --text: #e0e6f0;
+  --text-dim: #7a85a0;
+  --text-bright: #ffffff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  overflow-x: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+.header {
+  padding: 20px 32px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(180deg, #0d1220 0%, var(--bg) 100%);
+}
+.header h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, var(--accent-gold), #ffd700);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.header .subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* ── Controls ───────────────────────────────────────────────────── */
+.controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.btn {
+  background: var(--border);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: all 0.2s;
+}
+.btn:hover { background: #2a3450; border-color: var(--accent-blue); }
+.btn.active { background: var(--accent-blue); color: #000; border-color: var(--accent-blue); }
+.btn.gold { border-color: var(--accent-gold); color: var(--accent-gold); }
+.btn.gold:hover { background: var(--accent-gold); color: #000; }
+
+.slider-group { display: flex; align-items: center; gap: 8px; }
+.slider-group label { font-size: 12px; color: var(--text-dim); }
+input[type="range"] {
+  -webkit-appearance: none;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  background: var(--accent-gold);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.tick-display {
+  font-size: 13px;
+  color: var(--accent-gold);
+  min-width: 60px;
+  text-align: right;
+}
+
+/* ── Main viz area ──────────────────────────────────────────────── */
+.viz-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+.viz-panel {
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+.panel-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.panel-header.greedy { color: var(--accent-red); }
+.panel-header.planner { color: var(--accent-blue); }
+.panel-header.field { color: var(--accent-green); }
+
+.panel-metrics {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.metric { display: flex; flex-direction: column; }
+.metric-label { color: var(--text-dim); font-size: 10px; }
+.metric-value { color: var(--text-bright); font-size: 13px; font-weight: 600; }
+
+canvas.viz-canvas {
+  width: 100%;
+  height: 400px;
+  display: block;
+}
+
+/* ── Footer charts ─────────────────────────────────────────────── */
+.charts-section {
+  padding: 20px 32px;
+  border-top: 1px solid var(--border);
+}
+.charts-section h3 {
+  font-size: 13px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+.chart-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 20px;
+}
+.chart-box { }
+.chart-box h4 {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.chart-box.greedy h4 { color: var(--accent-red); }
+.chart-box.planner h4 { color: var(--accent-blue); }
+.chart-box.field h4 { color: var(--accent-green); }
+canvas.chart-canvas {
+  width: 100%;
+  height: 120px;
+  background: var(--panel);
+  border-radius: 6px;
+}
+
+/* ── Legend ─────────────────────────────────────────────────────── */
+.legend {
+  padding: 12px 32px;
+  display: flex;
+  gap: 24px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+}
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Synchronicity</h1>
+    <div class="subtitle">Energy-Based Incentive Fields for Multi-Agent Economic Coordination</div>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn gold" id="playBtn">▶ Play</button>
+  <button class="btn" id="resetBtn">↺ Reset</button>
+  <div class="slider-group">
+    <label>Speed</label>
+    <input type="range" id="speedSlider" min="50" max="1000" value="300" step="50">
+  </div>
+  <div class="slider-group">
+    <label>Tick</label>
+    <input type="range" id="tickSlider" min="0" max="199" value="0" style="width:300px;">
+  </div>
+  <div class="tick-display" id="tickDisplay">0 / 0</div>
+</div>
+
+<div class="viz-container" id="vizContainer">
+  <div class="viz-panel">
+    <div class="panel-header greedy">
+      <span>Greedy</span>
+      <span style="font-size:10px;color:var(--text-dim)">SELF-INTERESTED · NO COORDINATION</span>
+    </div>
+    <div class="panel-metrics" id="metrics-greedy">
+      <div class="metric"><span class="metric-label">EXTRACTED</span><span class="metric-value" id="g-ext">0</span></div>
+      <div class="metric"><span class="metric-label">WASTE</span><span class="metric-value" id="g-waste">0</span></div>
+      <div class="metric"><span class="metric-label">COLLISIONS</span><span class="metric-value" id="g-col">0</span></div>
+      <div class="metric"><span class="metric-label">TASKS</span><span class="metric-value" id="g-tasks">0</span></div>
+    </div>
+    <canvas class="viz-canvas" id="canvas-greedy"></canvas>
+  </div>
+
+  <div class="viz-panel">
+    <div class="panel-header planner">
+      <span>Planner</span>
+      <span style="font-size:10px;color:var(--text-dim)">CENTRAL OPTIMAL · UPPER BOUND</span>
+    </div>
+    <div class="panel-metrics" id="metrics-planner">
+      <div class="metric"><span class="metric-label">EXTRACTED</span><span class="metric-value" id="p-ext">0</span></div>
+      <div class="metric"><span class="metric-label">WASTE</span><span class="metric-value" id="p-waste">0</span></div>
+      <div class="metric"><span class="metric-label">COLLISIONS</span><span class="metric-value" id="p-col">0</span></div>
+      <div class="metric"><span class="metric-label">TASKS</span><span class="metric-value" id="p-tasks">0</span></div>
+    </div>
+    <canvas class="viz-canvas" id="canvas-planner"></canvas>
+  </div>
+
+  <div class="viz-panel">
+    <div class="panel-header field">
+      <span>Field</span>
+      <span style="font-size:10px;color:var(--text-dim)">SYNCHRONICITY · ENERGY FIELD</span>
+    </div>
+    <div class="panel-metrics" id="metrics-field">
+      <div class="metric"><span class="metric-label">EXTRACTED</span><span class="metric-value" id="f-ext">0</span></div>
+      <div class="metric"><span class="metric-label">WASTE</span><span class="metric-value" id="f-waste">0</span></div>
+      <div class="metric"><span class="metric-label">COLLISIONS</span><span class="metric-value" id="f-col">0</span></div>
+      <div class="metric"><span class="metric-label">TASKS</span><span class="metric-value" id="f-tasks">0</span></div>
+    </div>
+    <canvas class="viz-canvas" id="canvas-field"></canvas>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:var(--accent-gold)"></span> Task node (size = energy)</div>
+  <div class="legend-item"><span class="legend-dot" style="background:var(--accent-green)"></span> Successful action</div>
+  <div class="legend-item"><span class="legend-dot" style="background:var(--accent-red)"></span> Collision / failure</div>
+  <div class="legend-item"><span class="legend-dot" style="background:var(--accent-blue)"></span> Coupling (value chain)</div>
+</div>
+
+<div class="charts-section">
+  <h3>Extracted Value Over Time</h3>
+  <div class="chart-container">
+    <div class="chart-box greedy"><h4>Greedy</h4><canvas class="chart-canvas" id="chart-greedy"></canvas></div>
+    <div class="chart-box planner"><h4>Planner</h4><canvas class="chart-canvas" id="chart-planner"></canvas></div>
+    <div class="chart-box field"><h4>Field</h4><canvas class="chart-canvas" id="chart-field"></canvas></div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  Data (loaded inline — generated by run_recording.py)
+// ═══════════════════════════════════════════════════════════════════
+
+let VIZ_DATA = null;
+let currentTick = 0;
+let maxTick = 0;
+let playing = false;
+let playInterval = null;
+
+// Task type colors
+const TYPE_COLORS = {
+  collection: '#4ea8de',
+  processing: '#d4a017',
+  service: '#b388ff',
+  retail: '#00d09c',
+  distribution: '#00b4d8',
+};
+
+// Agent colors (consistent across panels)
+const AGENT_COLORS = [
+  '#ff6b6b', '#4ecdc4', '#ffe66d', '#a8e6cf',
+  '#ff8b94', '#c7ceea',
+];
+
+// ═══════════════════════════════════════════════════════════════════
+//  Canvas setup
+// ═══════════════════════════════════════════════════════════════════
+
+function setupCanvas(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  return { canvas, ctx, w: rect.width, h: rect.height };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Drawing
+// ═══════════════════════════════════════════════════════════════════
+
+function drawPanel(mechanism, tickIdx) {
+  const data = VIZ_DATA[mechanism];
+  if (!data || !data.ticks[tickIdx]) return;
+
+  const canvasId = `canvas-${mechanism}`;
+  const { canvas, ctx, w, h } = setupCanvas(canvasId);
+
+  const tickData = data.ticks[tickIdx];
+
+  // Clear
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(0, 0, w, h);
+
+  // ── Draw couplings (value chain edges) ──────────────────────
+  data.couplings.forEach(c => {
+    const src = data.task_positions[c.source];
+    const tgt = data.task_positions[c.target];
+    if (!src || !tgt) return;
+
+    const sx = src.x * w, sy = src.y * h;
+    const tx = tgt.x * w, ty = tgt.y * h;
+
+    // Curved line
+    ctx.strokeStyle = 'rgba(78, 168, 222, 0.15)';
+    ctx.lineWidth = 1 + c.coefficient * 1.5;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    const mx = (sx + tx) / 2;
+    const my = (sy + ty) / 2;
+    ctx.quadraticCurveTo(mx, my, tx, ty);
+    ctx.stroke();
+
+    // Arrow direction indicator
+    const dx = tx - mx, dy = ty - my;
+    const angle = Math.atan2(dy, dx);
+    const arrowX = tx - 22 * Math.cos(angle);
+    const arrowY = ty - 22 * Math.sin(angle);
+    ctx.fillStyle = 'rgba(78, 168, 222, 0.3)';
+    ctx.beginPath();
+    ctx.arc(arrowX, arrowY, 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // ── Draw task nodes ─────────────────────────────────────────
+  const maxEnergy = Math.max(...Object.values(tickData.energy));
+  const minRadius = 8;
+  const maxRadius = 28;
+
+  Object.entries(tickData.energy).forEach(([taskId, energy]) => {
+    const pos = data.task_positions[taskId];
+    if (!pos) return;
+
+    const x = pos.x * w, y = pos.y * h;
+    const ratio = maxEnergy > 0 ? energy / maxEnergy : 0;
+    const radius = minRadius + ratio * (maxRadius - minRadius);
+    const typeColor = TYPE_COLORS[data.task_types[taskId]] || '#d4a017';
+
+    // Glow for high-energy nodes
+    if (ratio > 0.5) {
+      const gradient = ctx.createRadialGradient(x, y, radius, x, y, radius * 2);
+      gradient.addColorStop(0, typeColor + '40');
+      gradient.addColorStop(1, typeColor + '00');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(x, y, radius * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Node circle
+    const alpha = Math.max(0.15, ratio);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = typeColor;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Border
+    ctx.strokeStyle = energy > 1 ? typeColor : '#333';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Energy label
+    if (energy > 2) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(Math.round(energy), x, y);
+    }
+
+    // Task name
+    ctx.fillStyle = '#7a85a0';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(taskId.replace(/_/g, ' '), x, y + radius + 12);
+  });
+
+  // ── Draw agent actions (this tick) ──────────────────────────
+  tickData.actions.forEach((action, i) => {
+    const pos = data.task_positions[action.task_id];
+    if (!pos) return;
+
+    const x = pos.x * w, y = pos.y * h;
+    const color = action.success ? '#00d09c' : (action.collision ? '#ff4d6d' : '#ff4d6d');
+
+    // Pulse ring
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(x, y, 18 + (i * 4), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Agent ID label
+    ctx.fillStyle = color;
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(action.agent_id, x, y - 22 - (i * 10));
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Metrics update
+// ═══════════════════════════════════════════════════════════════════
+
+function updateMetrics(tickIdx) {
+  const prefixes = { greedy: 'g', planner: 'p', field: 'f' };
+
+  Object.entries(VIZ_DATA).forEach(([mechanism, data]) => {
+    const p = prefixes[mechanism];
+    const tick = data.ticks[tickIdx];
+    if (!tick) return;
+
+    document.getElementById(`${p}-ext`).textContent = tick.extracted.toFixed(0);
+    document.getElementById(`${p}-waste`).textContent = tick.waste.toFixed(0);
+    document.getElementById(`${p}-col`).textContent = tick.collisions;
+
+    // Count successful tasks up to this tick
+    let tasks = 0;
+    for (let i = 0; i <= tickIdx; i++) {
+      tasks += data.ticks[i].actions.filter(a => a.success).length;
+    }
+    document.getElementById(`${p}-tasks`).textContent = tasks;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Line charts (extracted value over time)
+// ═══════════════════════════════════════════════════════════════════
+
+function drawChart(mechanism) {
+  const canvasId = `chart-${mechanism}`;
+  const { canvas, ctx, w, h } = setupCanvas(canvasId);
+
+  const data = VIZ_DATA[mechanism];
+  ctx.fillStyle = '#121828';
+  ctx.fillRect(0, 0, w, h);
+
+  const color = mechanism === 'greedy' ? '#ff4d6d'
+              : mechanism === 'planner' ? '#4ea8de' : '#00d09c';
+
+  const maxVal = Math.max(...data.ticks.map(t => t.extracted));
+  const nTicks = data.ticks.length;
+
+  // Grid
+  ctx.strokeStyle = '#1e2740';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = (h / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.ticks.forEach((tick, i) => {
+    const x = (i / (nTicks - 1)) * w;
+    const y = h - (tick.extracted / maxVal) * h * 0.9;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Current position
+  const cx = (currentTick / (nTicks - 1)) * w;
+  const cy = h - (data.ticks[currentTick].extracted / maxVal) * h * 0.9;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Playback
+// ═══════════════════════════════════════════════════════Period══════════════════════════════════
+
+function renderTick(tickIdx) {
+  currentTick = tickIdx;
+  drawPanel('greedy', tickIdx);
+  drawPanel('planner', tickIdx);
+  drawPanel('field', tickIdx);
+  drawChart('greedy');
+  drawChart('planner');
+  drawChart('field');
+  updateMetrics(tickIdx);
+
+  document.getElementById('tickDisplay').textContent = `${tickIdx + 1} / ${maxTick}`;
+  document.getElementById('tickSlider').value = tickIdx;
+}
+
+function play() {
+  playing = true;
+  document.getElementById('playBtn').textContent = '⏸ Pause';
+  const speed = parseInt(document.getElementById('speedSlider').value);
+
+  playInterval = setInterval(() => {
+    if (currentTick >= maxTick - 1) {
+      pause();
+      return;
+    }
+    renderTick(currentTick + 1);
+  }, speed);
+}
+
+function pause() {
+  playing = false;
+  document.getElementById('playBtn').textContent = '▶ Play';
+  clearInterval(playInterval);
+}
+
+function reset() {
+  pause();
+  renderTick(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Data loading
+// ═════════════════════════════════════════════════════ gradient════════════════════════════════
+
+async function loadData() {
+  try {
+    const response = await fetch('viz_data.json');
+    VIZ_DATA = await response.json();
+
+    maxTick = VIZ_DATA.greedy.ticks.length;
+    document.getElementById('tickSlider').max = maxTick - 1;
+
+    renderTick(0);
+  } catch (e) {
+    document.body.innerHTML = '<div style="padding:40px;color:#ff4d6d;font-family:monospace">' +
+      'Could not load viz_data.json. Run: <code>python3 run_recording.py</code><br><br>' +
+      'Then serve: <code>python3 -m http.server 8000</code> and open http://localhost:8000/viz.html<br><br>' +
+      'Error: ' + e.message + '</div>';
+  }
+}
+
+// ── Event listeners ──────────────────────────────────────────
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (playing) pause(); else play();
+});
+document.getElementById('resetBtn').addEventListener('click', reset);
+document.getElementById('tickSlider').addEventListener('input', (e) => {
+  pause();
+  renderTick(parseInt(e.target.value));
+});
+document.getElementById('speedSlider').addEventListener('input', () => {
+  if (playing) { pause(); play(); }
+});
+
+window.addEventListener('resize', () => renderTick(currentTick));
+
+// ── Init ─────────────────────────────────────────────────────
+loadData();
+</script>
+</body>
+</html>

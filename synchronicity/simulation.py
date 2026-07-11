@@ -162,11 +162,13 @@ class Simulation:
     agents decide independently.
     """
 
-    def __init__(self, chain: ValueChain, field: EnergyField, config: SimulationConfig):
+    def __init__(self, chain: ValueChain, field: EnergyField, config: SimulationConfig,
+                 recorder=None):
         self.chain = chain
         self.field = field
         self.config = config
         self.reward_machine = RewardMachine(chain)
+        self.recorder = recorder
         self.planner: Optional[PlannerSystem] = None
 
         if config.mechanism == MechanismType.PLANNER:
@@ -201,8 +203,12 @@ class Simulation:
         entropy_hist: list[float] = []
         extraction_hist: list[float] = []
         tasks_completed = 0
+        tick_collisions = 0
 
         for tick in range(self.config.ticks):
+            tick_actions: list[dict] = []
+            tick_collisions = 0
+
             # Periodic capital injection (keeps the economy running)
             if self.config.injection_schedule:
                 for event in self.config.injection_schedule(tick):
@@ -236,6 +242,14 @@ class Simulation:
                     if field.energy_at(decision.task_id) < 0.5:
                         # Task already drained by another agent in this batch
                         agent.receive_reward(0.0, success=False)
+                        tick_collisions += 1
+                        tick_actions.append({
+                            "agent_id": agent.id,
+                            "task_id": decision.task_id,
+                            "success": False,
+                            "reward": 0.0,
+                            "collision": True,
+                        })
                         continue
 
                     efficiency, task_id = agent.execute(decision)
@@ -250,6 +264,13 @@ class Simulation:
                         reward = machine.apply(field, event)
                         agent.receive_reward(reward, success=True)
                         tasks_completed += 1
+                        tick_actions.append({
+                            "agent_id": agent.id,
+                            "task_id": task_id,
+                            "success": True,
+                            "reward": round(reward, 2),
+                            "collision": False,
+                        })
                     else:
                         event = FieldEvent(
                             event_type=EventType.TASK_FAILED,
@@ -258,11 +279,26 @@ class Simulation:
                         )
                         machine.apply(field, event)
                         agent.receive_reward(0.0, success=False)
+                        tick_collisions += 1
+                        tick_actions.append({
+                            "agent_id": agent.id,
+                            "task_id": task_id,
+                            "success": False,
+                            "reward": 0.0,
+                            "collision": False,
+                        })
 
             # Record metrics
             energy_hist.append(field.total_energy())
             entropy_hist.append(field.total_waste)
             extraction_hist.append(field.total_extracted)
+
+            # Record for visualization
+            if self.recorder:
+                self.recorder.record_tick(
+                    tick, field, sum(a.tasks_failed for a in agents),
+                    tick_actions,
+                )
 
             # Early termination only if truly dead — no energy AND no injection
             if (
