@@ -43,11 +43,13 @@ logger = logging.getLogger(__name__)
 
 
 class MechanismType(str, Enum):
-    """The three coordination mechanisms under comparison."""
+    """The coordination mechanisms under comparison."""
 
     GREEDY = "greedy"        # Baseline A: self-interested, no coordination
     PLANNER = "planner"      # Baseline B: central optimal assignment
-    FIELD = "field"          # Synchronicity: energy field navigation
+    FIELD = "field"          # Synchronicity heuristic: energy field navigation
+    ACTIVE_INFERENCE = "active_inference"  # FEP-based: minimize expected free energy
+    LLM = "llm"              # Real LLM agent (Hermes) reading the field
 
 
 @dataclass
