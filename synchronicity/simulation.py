@@ -187,7 +187,10 @@ class Simulation:
         self.planner: Optional[PlannerSystem] = None
 
         if config.mechanism == MechanismType.PLANNER:
-            self.planner = PlannerSystem(chain)
+            planner_mode = "sigma" if use_sigma else "energy"
+            self.planner = PlannerSystem(
+                chain, mode=planner_mode, sigma_tracker=self.sigma_tracker,
+            )
 
     def run(self, agents: list[BaseAgent]) -> SimulationResult:
         """Run the simulation using batch-based commitment.

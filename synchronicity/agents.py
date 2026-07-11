@@ -264,16 +264,22 @@ class PlannerSystem:
     """Central planner that assigns agents to tasks optimally.
 
     Uses the Hungarian algorithm to solve the assignment problem:
-    maximize total energy processed, given agent capabilities and task
+    maximize total value processed, given agent capabilities and task
     energy levels. Each tick, it reassigns all agents.
 
     This is the strongest possible baseline — it has perfect information
     and solves the optimization problem exactly. If the Synchronicity
     mechanism (FieldAgent) gets close to this, that's a strong result.
+
+    Supports two scoring modes:
+      - 'energy': cost matrix = energy × base_efficiency (original, myopic)
+      - 'sigma':  cost matrix = energy × σ_chain (σ-aware, uses composition rule)
     """
 
-    def __init__(self, chain: ValueChain):
+    def __init__(self, chain: ValueChain, mode: str = "energy", sigma_tracker=None):
         self.chain = chain
+        self.mode = mode
+        self.sigma_tracker = sigma_tracker
 
     def assign(
         self,
@@ -295,7 +301,6 @@ class PlannerSystem:
 
         # Build cost matrix (negative because we maximize)
         # Rows = agents, Cols = tasks
-        # Value = energy the agent would process if assigned to this task
         cost_matrix = np.zeros((n_agents, n_tasks))
         for i, agent in enumerate(agents):
             for j, task_id in enumerate(task_ids):
@@ -304,7 +309,15 @@ class PlannerSystem:
 
                 if caps and not caps.intersection(agent.capability.capabilities):
                     cost_matrix[i][j] = 0  # can't do it
+                elif self.mode == "sigma" and self.sigma_tracker:
+                    # σ-aware scoring: value = energy × σ_chain
+                    # Uses the composition rule for downstream potential
+                    sigma_chain = self.sigma_tracker.chain_sigma(
+                        agent.id, task_id, self.chain, snapshot, max_depth=3,
+                    )
+                    cost_matrix[i][j] = energy * sigma_chain
                 else:
+                    # Original myopic scoring
                     cost_matrix[i][j] = energy * agent.capability.base_efficiency
 
         # Solve (minimize negative = maximize positive)
