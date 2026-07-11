@@ -165,12 +165,25 @@ class Simulation:
     """
 
     def __init__(self, chain: ValueChain, field: EnergyField, config: SimulationConfig,
-                 recorder=None):
+                 recorder=None, use_sigma: bool = False, sigma_tracker=None):
         self.chain = chain
         self.field = field
         self.config = config
-        self.reward_machine = RewardMachine(chain)
         self.recorder = recorder
+
+        # Choose reward machine: σ-based (variable efficiency) or fixed-parameter
+        if use_sigma:
+            from synchronicity.sigma_reward_machine import SigmaRewardMachine
+            if sigma_tracker is None:
+                from synchronicity.sigma_framework import build_task_complexities, SigmaTracker
+                complexities = build_task_complexities(chain)
+                sigma_tracker = SigmaTracker(complexities)
+            self.sigma_tracker = sigma_tracker
+            self.reward_machine = SigmaRewardMachine(chain, sigma_tracker)
+        else:
+            self.sigma_tracker = sigma_tracker
+            self.reward_machine = RewardMachine(chain)
+
         self.planner: Optional[PlannerSystem] = None
 
         if config.mechanism == MechanismType.PLANNER:
