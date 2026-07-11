@@ -328,22 +328,20 @@ class FieldAgent(BaseAgent):
     Unlike the greedy agent (which only sees raw energy), the FieldAgent
     uses three strategic signals that greedy ignores:
 
-    1. Competition estimation: The expected value of targeting a task drops
-       as more agents in the same batch can also target it. If 3 laborers
-       all see collect_north with 80 energy, each one's expected payoff is
-       ~27, not 80 — because only one of them will get it. Greedy agents
-       all rush the same task and collide. Field agents spread out.
+    1. Learned competition model: The agent tracks energy depletion patterns
+       across ticks to learn WHERE other agents are likely to go. If task X
+       was drained last tick (by another agent), the agent knows it has
+       competition there. This is an empirical model built from observation,
+       not a heuristic.
 
     2. Downstream multiplier: Completing a bridge task unlocks energy
        downstream. The true value of sorting isn't just its own energy —
        it's its energy PLUS the downstream energy it propagates to (weighted
-       by coupling coefficients). A greedy agent sees sorting as "just
-       another task." A field agent sees it as a multiplier.
+       by coupling coefficients).
 
     3. Capability exclusivity: If the agent is one of few who can do a
-       bottleneck task (like sorting, which only specialists can do), the
-       system needs them there. The field agent values tasks higher when
-       fewer competitors can do them.
+       bottleneck task, the system needs them there. The field agent values
+       tasks higher when fewer competitors can do them.
 
     The scoring function is intentionally transparent and tunable. In a
     full LLM implementation, the agent would reason about these same factors
@@ -357,60 +355,61 @@ class FieldAgent(BaseAgent):
         downstream_weight: float = 0.5,
         competition_weight: float = 1.0,
         exclusivity_weight: float = 0.3,
+        learning_rate: float = 0.15,
     ):
         super().__init__(capability)
         self.chain = chain
         self.downstream_weight = downstream_weight
         self.competition_weight = competition_weight
         self.exclusivity_weight = exclusivity_weight
-        # Track which agents we've observed (for competition estimation)
-        self._observed_agents: set[str] = set()
+        self.learning_rate = learning_rate
+
+        # Learned competition model: task_id → estimated probability of
+        # being targeted by another agent in the next tick.
+        # Initialized to uniform (no prior knowledge).
+        self._competition_pressure: dict[str, float] = {}
+
+        # Track energy levels observed last tick to detect depletion
+        self._last_energy_observed: dict[str, float] = {}
 
     def observe(self, snapshot: FieldSnapshot) -> None:
-        """Track snapshot for decision-making."""
-        self._last_snapshot = snapshot
+        """Update the learned competition model from observed state changes.
 
-    def _estimate_competition(
-        self, task_id: str, snapshot: FieldSnapshot
-    ) -> float:
-        """Estimate how many OTHER agents will likely target this task.
-
-        We don't know exactly what other agents will do, but we can estimate
-        based on: how many distinct capability sets could target this task?
-        In a batch of N agents, if K agents have matching capabilities and
-        the task has high energy, expect ~min(K, batch_size) competitors.
-
-        Since the agent doesn't know the exact batch composition, we use a
-        heuristic: tasks with common capabilities (like "labor") face more
-        competition than tasks with rare capabilities (like "sorting").
-
-        Returns: estimated number of competing agents (excluding self).
+        Between the previous snapshot and the current one, energy at some
+        tasks dropped. Those drops indicate other agents completed (or
+        attempted) those tasks. We use this signal to learn where competitors
+        are concentrating.
         """
-        task_caps = snapshot.task_capabilities.get(task_id, frozenset())
-        if not task_caps:
-            return 0.0  # anyone can do it → high competition, handled below
+        # On first observation, just store baseline
+        if not self._last_energy_observed:
+            self._last_energy_observed = dict(snapshot.task_energy)
+            self._last_snapshot = snapshot
+            return
 
-        # How common are the required capabilities?
-        # We infer this from the task: capabilities that appear on many tasks
-        # are common (labor), capabilities that appear on few tasks are rare
-        # (sorting, processing, sales).
-        cap_frequency: dict[str, int] = {}
-        for tid, caps in snapshot.task_capabilities.items():
-            for cap in caps:
-                cap_frequency[cap] = cap_frequency.get(cap, 0) + 1
+        # Detect tasks where energy dropped significantly (indicating another
+        # agent completed the task and drained it)
+        for task_id, current_energy in snapshot.task_energy.items():
+            prev_energy = self._last_energy_observed.get(task_id, 0.0)
+            drop = prev_energy - current_energy
 
-        # Average frequency of this task's required capabilities.
-        # High frequency = common skill = many potential competitors.
-        avg_freq = sum(cap_frequency.get(c, 1) for c in task_caps) / len(task_caps)
-        n_tasks = len(snapshot.task_capabilities)
+            if drop > 5.0:
+                # Another agent (or agents) hit this task. Update pressure
+                # estimate using exponential moving average.
+                old_pressure = self._competition_pressure.get(task_id, 0.0)
+                # Magnitude of the pressure update proportional to energy drop
+                # relative to total energy in the system
+                total_e = max(sum(snapshot.task_energy.values()), 1.0)
+                intensity = min(drop / total_e * 10, 1.0)
+                new_pressure = old_pressure + self.learning_rate * (intensity - old_pressure)
+                self._competition_pressure[task_id] = new_pressure
+            elif drop <= 0:
+                # Energy didn't drop → no competition here → decay pressure
+                old_pressure = self._competition_pressure.get(task_id, 0.0)
+                self._competition_pressure[task_id] = old_pressure * (1 - self.learning_rate * 0.5)
 
-        # Normalize: if the capability appears on most tasks, competition is
-        # high. If it's rare, competition is low.
-        commonness = avg_freq / max(n_tasks, 1)
-        # Scale to an estimated competitor count (heuristic)
-        estimated_competitors = commonness * 4.0  # tuneable scaling
-
-        return estimated_competitors
+        # Update baseline
+        self._last_energy_observed = dict(snapshot.task_energy)
+        self._last_snapshot = snapshot
 
     def _downstream_energy_potential(
         self, task_id: str, snapshot: FieldSnapshot
@@ -425,10 +424,9 @@ class FieldAgent(BaseAgent):
         Uses the transitive closure of the downstream graph (not just immediate
         children) to capture multi-hop value chains.
         """
-        # BFS/DFS through downstream graph, accumulating weighted energy
         visited: set[str] = set()
         total = 0.0
-        frontier = [(task_id, 1.0)]  # (task_id, accumulated_coupling)
+        frontier = [(task_id, 1.0)]
 
         while frontier:
             current, coupling = frontier.pop(0)
@@ -439,8 +437,6 @@ class FieldAgent(BaseAgent):
                 accumulated = coupling * coeff
                 downstream_energy = snapshot.task_energy.get(downstream_id, 0.0)
                 total += downstream_energy * accumulated
-                # Add capacity as potential (even if currently empty,
-                # completing this task could fill it)
                 frontier.append((downstream_id, accumulated))
 
         return total
@@ -462,28 +458,22 @@ class FieldAgent(BaseAgent):
             if task_caps and not task_caps.intersection(self.capability.capabilities):
                 continue
 
-            # ── Factor 1: Competition-adjusted expected energy ───────
-            # The agent won't get the full energy if other agents are also
-            # targeting this task. Expected value = energy / (1 + competitors)
-            competitors = self._estimate_competition(task_id, snap)
-            expected_energy = energy / (1.0 + competitors * self.competition_weight)
+            # ── Factor 1: Learned competition-adjusted expected energy ─
+            # Use the learned competition pressure to discount expected payoff.
+            # Tasks with high observed competition get their expected energy
+            # reduced — the agent is less likely to get the full reward.
+            pressure = self._competition_pressure.get(task_id, 0.0)
+            expected_energy = energy / (1.0 + pressure * self.competition_weight)
 
             # ── Factor 2: Downstream multiplier ──────────────────────
-            # The true value of this task includes the downstream energy it
-            # unlocks. This is what makes bridge tasks (like sorting) worth
-            # more than their raw energy suggests.
             downstream_potential = self._downstream_energy_potential(task_id, snap)
             downstream_bonus = downstream_potential * self.downstream_weight * 0.01
 
             # ── Factor 3: Capability exclusivity ─────────────────────
-            # If few tasks require this agent's capabilities, the agent is
-            # more valuable at this task. A specialist doing sorting (which
-            # only 2 agents can do) is more valuable than a laborer collecting
-            # (which 3 agents can do).
             if task_caps:
-                exclusivity = 1.0 / len(task_caps)  # simpler requirement = less exclusive
+                exclusivity = 1.0 / len(task_caps)
             else:
-                exclusivity = 0.5  # no requirements = anyone can do it
+                exclusivity = 0.5
             exclusivity_bonus = (1.0 - exclusivity) * self.exclusivity_weight * 20
 
             score = expected_energy + downstream_bonus + exclusivity_bonus
@@ -491,6 +481,7 @@ class FieldAgent(BaseAgent):
             scores[task_id] = score
             reasoning_parts[task_id] = (
                 f"E={energy:.0f}→exp={expected_energy:.1f}"
+                f" (pressure={pressure:.2f})"
                 f" + downstream={downstream_bonus:.1f}"
                 f" + excl={exclusivity_bonus:.1f}"
                 f" = {score:.1f}"
@@ -499,9 +490,7 @@ class FieldAgent(BaseAgent):
         if not scores:
             return AgentDecision(task_id=None, reasoning="no viable tasks")
 
-        # Softmax sampling over STRUCTURED scores. Same selection mechanism as
-        # GreedyAgent, but the scores encode competition-adjusted expected
-        # energy, downstream multiplier, and capability exclusivity.
+        # Softmax sampling over STRUCTURED scores.
         best_task = _softmax_sample(scores, temperature=1.0)
 
         return AgentDecision(
