@@ -165,14 +165,28 @@ class Simulation:
     """
 
     def __init__(self, chain: ValueChain, field: EnergyField, config: SimulationConfig,
-                 recorder=None, use_sigma: bool = False, sigma_tracker=None):
+                 recorder=None, use_sigma: bool = False, sigma_tracker=None,
+                 angel_alpha: float = 0.0, gradient_gamma: float = 0.0):
         self.chain = chain
         self.field = field
         self.config = config
         self.recorder = recorder
+        self.use_angel = angel_alpha > 0 or gradient_gamma > 0
 
-        # Choose reward machine: σ-based (variable efficiency) or fixed-parameter
-        if use_sigma:
+        # Choose reward machine: angel > σ > fixed
+        if self.use_angel:
+            from synchronicity.angel_reward_machine import AngelRewardMachine
+            if sigma_tracker is None:
+                from synchronicity.sigma_framework import build_task_complexities, SigmaTracker
+                complexities = build_task_complexities(chain)
+                sigma_tracker = SigmaTracker(complexities)
+            self.sigma_tracker = sigma_tracker
+            self.reward_machine = AngelRewardMachine(
+                chain, sigma_tracker,
+                angel_alpha=angel_alpha,
+                gradient_gamma=gradient_gamma,
+            )
+        elif use_sigma:
             from synchronicity.sigma_reward_machine import SigmaRewardMachine
             if sigma_tracker is None:
                 from synchronicity.sigma_framework import build_task_complexities, SigmaTracker
@@ -187,7 +201,7 @@ class Simulation:
         self.planner: Optional[PlannerSystem] = None
 
         if config.mechanism == MechanismType.PLANNER:
-            planner_mode = "lookahead" if use_sigma else "energy"
+            planner_mode = "lookahead" if (use_sigma or self.use_angel) else "energy"
             self.planner = PlannerSystem(
                 chain, mode=planner_mode, sigma_tracker=self.sigma_tracker,
             )
@@ -305,6 +319,16 @@ class Simulation:
                             "reward": 0.0,
                             "collision": False,
                         })
+
+            # Apply angel coefficient tick decay (gradient fading)
+            if hasattr(self.reward_machine, 'apply_tick_decay'):
+                self.reward_machine.apply_tick_decay(field)
+
+            # Verify conservation (angel machine has its own check)
+            if hasattr(self.reward_machine, 'check_conservation'):
+                self.reward_machine.check_conservation(field)
+            else:
+                field.check_conservation()
 
             # Record metrics
             energy_hist.append(field.total_energy())
