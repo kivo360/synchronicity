@@ -37,93 +37,70 @@ def build_trash_cleanup_scenario() -> tuple[ValueChain, EnergyField]:
         collect_south ─┼→ sort_center ─┬→ compost ─→ market_stall
         park_cleanup  ─┘               └→ recycling → wholesale
 
-    This is a branching chain: sort_center is a bridge node whose two
-    downstream paths (composting vs recycling) serve different markets.
-    Agents that only look at immediate energy (greedy) will flood whichever
-    path currently has the most energy, causing waste through capacity
-    overflow. Agents that read the field structurally will balance the two
-    paths and avoid bottlenecks.
+    Key structural features:
+    - 3 source tasks (collection) feed 1 bottleneck (sorting)
+    - Sorting branches to 2 mid-chain processors (compost/recycling)
+    - 2 terminal markets with TIGHT capacity (60 each)
+    - Only 2 agents can sort → bottleneck creates strategic tension
+    - Terminal capacity overflow = lost value (energy backs up and
+      is extracted without completing the full chain)
 
-    The sorting task is the strategic decision point: completing it routes
-    energy to BOTH downstream paths. A greedy agent sees sorting as just
-    another task with some energy. A field-aware agent sees it as a
-    multiplier — one completion feeds two value chains.
+    The sorting bottleneck is where coordination matters: if both
+    specialists are processing downstream, sorting stalls and energy
+    backs up at collection tasks. Field-aware agents should prioritize
+    the bottleneck; greedy agents won't.
     """
     chain = ValueChain("trash-cleanup")
 
     tasks = [
-        Task(
-            id="collect_north",
-            task_type=TaskType.COLLECTION,
-            location="north",
-            energy_capacity=120.0,
-            required_capabilities=frozenset(["labor"]),
-        ),
-        Task(
-            id="collect_south",
-            task_type=TaskType.COLLECTION,
-            location="south",
-            energy_capacity=120.0,
-            required_capabilities=frozenset(["labor"]),
-        ),
-        Task(
-            id="park_cleanup",
-            task_type=TaskType.SERVICE,
-            location="central_park",
-            energy_capacity=80.0,
-            required_capabilities=frozenset(["labor"]),
-        ),
-        Task(
-            id="sort_center",
-            task_type=TaskType.PROCESSING,
-            location="center",
-            energy_capacity=150.0,
-            required_capabilities=frozenset(["sorting"]),
-        ),
-        Task(
-            id="compost",
-            task_type=TaskType.PROCESSING,
-            location="center",
-            energy_capacity=100.0,
-            required_capabilities=frozenset(["processing"]),
-        ),
-        Task(
-            id="recycling",
-            task_type=TaskType.PROCESSING,
-            location="east",
-            energy_capacity=100.0,
-            required_capabilities=frozenset(["processing"]),
-        ),
-        Task(
-            id="market_stall",
-            task_type=TaskType.RETAIL,
-            location="downtown",
-            energy_capacity=80.0,
-            required_capabilities=frozenset(["sales"]),
-        ),
-        Task(
-            id="wholesale",
-            task_type=TaskType.DISTRIBUTION,
-            location="port",
-            energy_capacity=80.0,
-            required_capabilities=frozenset(["sales"]),
-        ),
+        # Source tasks (3, high capacity — represents ongoing trash generation)
+        Task(id="collect_north", task_type=TaskType.COLLECTION,
+             location="north", energy_capacity=200.0,
+             required_capabilities=frozenset(["labor"])),
+        Task(id="collect_south", task_type=TaskType.COLLECTION,
+             location="south", energy_capacity=200.0,
+             required_capabilities=frozenset(["labor"])),
+        Task(id="park_cleanup", task_type=TaskType.SERVICE,
+             location="central_park", energy_capacity=150.0,
+             required_capabilities=frozenset(["labor"])),
+
+        # Bottleneck: ALL collection feeds through one sorting task
+        # Only 2 agents can sort. Tight capacity creates pressure.
+        Task(id="sort_center", task_type=TaskType.PROCESSING,
+             location="center", energy_capacity=120.0,
+             required_capabilities=frozenset(["sorting"])),
+
+        # Mid-chain processors (each gets half the sorted material)
+        Task(id="compost", task_type=TaskType.PROCESSING,
+             location="center", energy_capacity=100.0,
+             required_capabilities=frozenset(["processing"])),
+        Task(id="recycling", task_type=TaskType.PROCESSING,
+             location="east", energy_capacity=100.0,
+             required_capabilities=frozenset(["processing"])),
+
+        # Terminal markets (TIGHT capacity — this is where overflow hurts)
+        Task(id="market_stall", task_type=TaskType.RETAIL,
+             location="downtown", energy_capacity=60.0,
+             required_capabilities=frozenset(["sales"])),
+        Task(id="wholesale", task_type=TaskType.DISTRIBUTION,
+             location="port", energy_capacity=60.0,
+             required_capabilities=frozenset(["sales"])),
     ]
 
     for task in tasks:
         chain.add_task(task)
 
     couplings = [
-        # Collection feeds sorting
+        # All collection feeds into the single bottleneck
         Coupling("collect_north", "sort_center", coefficient=0.8),
         Coupling("collect_south", "sort_center", coefficient=0.8),
         Coupling("park_cleanup", "sort_center", coefficient=0.6),
 
-        # Sorting branches into two paths
+        # Sorting branches to two processors
         Coupling("sort_center", "compost", coefficient=0.5),
         Coupling("sort_center", "recycling", coefficient=0.5),
 
-        # Each path feeds its own market
+        # Each processor feeds its own terminal market
         Coupling("compost", "market_stall", coefficient=1.0),
         Coupling("recycling", "wholesale", coefficient=1.0),
     ]
@@ -140,13 +117,17 @@ def make_agents_for_mechanism(mechanism, chain: ValueChain) -> list:
 
     Agent roster (6 agents, 3 capability types):
       - 3 laborers (can collect + park cleanup)
-      - 2 specialists (can sort + process)
+      - 2 specialists (can sort + process) ← bottleneck controllers
       - 1 vendor (can run market stall + wholesale)
 
-    The capability distribution is intentionally constrained: only 2 agents
-    can sort, which is the bridge task. This creates a strategic decision —
-    if both specialists are busy processing downstream, sorting (and thus
-    the whole value chain) stalls.
+    The capability distribution creates a real strategic tension:
+    - The bottleneck (sort_center) can only be worked by 2 agents
+    - Those same 2 agents are the ONLY ones who can process compost/recycling
+    - If both specialists are doing downstream processing, sorting stalls
+    - If both are sorting, downstream processing stalls
+    - Optimal: one sorts, one processes → full chain flows
+    - Greedy agents will both rush whatever has highest energy
+    - Field-aware agents should recognize the bottleneck and split
     """
     agents = []
 

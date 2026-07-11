@@ -23,6 +23,7 @@ agent decision-making differs. This isolates the variable being tested.
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass, field as dc_field
 from enum import Enum
 from typing import Optional, Callable
@@ -55,16 +56,28 @@ class SimulationConfig:
 
     Attributes:
         mechanism: Which coordination mechanism to use.
-        ticks: Number of simulation steps.
+        ticks: Number of simulation steps (epochs).
         injection_schedule: Optional function (tick → list[FieldEvent]) to
             inject capital periodically. None = no ongoing injection.
         seed: Random seed for reproducibility.
+        batch_size: Number of agents that commit simultaneously within a tick.
+            Within a batch, all agents see the SAME stale field snapshot and
+            commit decisions before any execute. This creates real collisions:
+            if two agents target the same task, only one succeeds; the other
+            wastes the attempt. Between batches, field state propagates.
+
+            batch_size=1 is the original sequential model (implicit coordination).
+            batch_size=len(agents) is fully simultaneous (maximum collisions).
+            batch_size=2-3 approximates local-network propagation in a tree
+            topology: nearby nodes see consistent state, distant nodes see
+            stale state.
     """
 
     mechanism: MechanismType
     ticks: int = 100
     injection_schedule: Optional[Callable[[int], list[FieldEvent]]] = None
     seed: Optional[int] = None
+    batch_size: int = 3
 
     def __post_init__(self):
         if self.seed is not None:
@@ -102,9 +115,11 @@ class SimulationResult:
     agent_stats: list[dict]
     gini_coefficient: float
     tasks_completed: int
+    collisions: int
     energy_history: list[float]
     entropy_history: list[float]
     extraction_history: list[float]
+    end_to_end_throughput: float
 
     def summary(self) -> str:
         lines = [
@@ -115,6 +130,8 @@ class SimulationResult:
             f"  Efficiency:      {self.efficiency_ratio:.1%}",
             f"  Gini (equity):   {self.gini_coefficient:.3f}",
             f"  Tasks completed: {self.tasks_completed}",
+            f"  Collisions:      {self.collisions}",
+            f"  End-to-end:      {self.end_to_end_throughput:.1f}",
             f"  Agents:          {len(self.agent_rewards)}",
         ]
         return "\n".join(lines)
@@ -156,9 +173,29 @@ class Simulation:
             self.planner = PlannerSystem(chain)
 
     def run(self, agents: list[BaseAgent]) -> SimulationResult:
-        """Run the simulation for the configured number of ticks."""
+        """Run the simulation using batch-based commitment.
+
+        Each tick (epoch) is split into batches of `batch_size` agents.
+        Within a batch:
+          1. All agents in the batch observe the SAME field snapshot
+          2. All agents commit decisions based on that snapshot
+          3. Decisions execute in random order — collisions on the same task
+             cause waste (second agent fails)
+        Between batches, the field state propagates.
+
+        This models a tree topology: agents in the same batch are "local"
+        to each other and see consistent state. Agents in different batches
+        see propagated state from earlier batches.
+
+        Why this matters: with batch_size >= 2, greedy agents collide on
+        high-energy tasks. Field-aware agents (who consider the full value
+        chain) spread across tasks because their scoring includes downstream
+        depth, not just raw energy.
+        """
         field = self.field
         machine = self.reward_machine
+        batch_size = self.config.batch_size
+        random.shuffle(agents)  # randomize batch membership each tick
 
         energy_hist: list[float] = []
         entropy_hist: list[float] = []
@@ -171,51 +208,56 @@ class Simulation:
                 for event in self.config.injection_schedule(tick):
                     machine.apply(field, event)
 
-            snapshot = field.snapshot()
+            # Split agents into batches
+            for batch_start in range(0, len(agents), batch_size):
+                batch = agents[batch_start : batch_start + batch_size]
 
-            # Decision phase — collect all decisions first
-            if self.config.mechanism == MechanismType.PLANNER:
-                self.planner.assign(
-                    [a for a in agents if isinstance(a, PlannerAgent)],
-                    snapshot,
-                )
+                # Phase 1: all agents in batch observe the SAME snapshot
+                snapshot = field.snapshot()
+                for agent in batch:
+                    agent.observe(snapshot)
 
-            # Execution phase — process agents sequentially, re-reading the
-            # field between actions so later agents see updated energy levels.
-            # This simulates real-time field updates: when agent A drains a
-            # task, agent B sees the updated incentive and picks something else.
-            for agent in agents:
-                # Re-snapshot so the agent sees the current field state
-                agent.observe(field.snapshot())
-                decision = agent.decide()
-
-                if decision.task_id is None:
-                    continue
-
-                # Check if there's still energy at the task
-                if field.energy_at(decision.task_id) < 0.5:
-                    continue  # task exhausted, skip
-
-                efficiency, task_id = agent.execute(decision)
-
-                if efficiency > 0:
-                    event = FieldEvent(
-                        event_type=EventType.TASK_COMPLETED,
-                        task_id=task_id,
-                        agent_id=agent.id,
-                        efficiency=efficiency,
+                # Planner assigns within this batch
+                if self.config.mechanism == MechanismType.PLANNER and self.planner:
+                    self.planner.assign(
+                        [a for a in batch if isinstance(a, PlannerAgent)],
+                        snapshot,
                     )
-                    reward = machine.apply(field, event)
-                    agent.receive_reward(reward, success=True)
-                    tasks_completed += 1
-                else:
-                    event = FieldEvent(
-                        event_type=EventType.TASK_FAILED,
-                        task_id=task_id,
-                        agent_id=agent.id,
-                    )
-                    machine.apply(field, event)
-                    agent.receive_reward(0.0, success=False)
+
+                # Phase 2: all agents commit decisions
+                decisions = [(agent, agent.decide()) for agent in batch]
+
+                # Phase 3: execute in random order (simulates network race)
+                random.shuffle(decisions)
+
+                for agent, decision in decisions:
+                    if decision.task_id is None:
+                        continue
+                    if field.energy_at(decision.task_id) < 0.5:
+                        # Task already drained by another agent in this batch
+                        agent.receive_reward(0.0, success=False)
+                        continue
+
+                    efficiency, task_id = agent.execute(decision)
+
+                    if efficiency > 0:
+                        event = FieldEvent(
+                            event_type=EventType.TASK_COMPLETED,
+                            task_id=task_id,
+                            agent_id=agent.id,
+                            efficiency=efficiency,
+                        )
+                        reward = machine.apply(field, event)
+                        agent.receive_reward(reward, success=True)
+                        tasks_completed += 1
+                    else:
+                        event = FieldEvent(
+                            event_type=EventType.TASK_FAILED,
+                            task_id=task_id,
+                            agent_id=agent.id,
+                        )
+                        machine.apply(field, event)
+                        agent.receive_reward(0.0, success=False)
 
             # Record metrics
             energy_hist.append(field.total_energy())
@@ -234,6 +276,20 @@ class Simulation:
         total_extracted = field.total_extracted
         total_waste = field.total_waste
         efficiency = total_extracted / max(total_extracted + total_waste, 0.001)
+        total_collisions = sum(a.tasks_failed for a in agents)
+
+        # End-to-end throughput: how much energy reached TERMINAL tasks
+        # (tasks with no downstream couplings — the final market/retail nodes).
+        # This measures whether the value chain actually flowed end-to-end.
+        terminal_ids = [
+            tid for tid in self.chain.all_task_ids()
+            if not self.chain.downstream(tid)
+        ]
+        end_to_end = sum(
+            field.history[-1].get(tid, 0.0)
+            for tid in terminal_ids
+            if field.history
+        )
 
         return SimulationResult(
             mechanism=self.config.mechanism,
@@ -245,7 +301,9 @@ class Simulation:
             agent_stats=[a.stats() for a in agents],
             gini_coefficient=gini_coefficient(rewards),
             tasks_completed=tasks_completed,
+            collisions=total_collisions,
             energy_history=energy_hist,
             entropy_history=entropy_hist,
             extraction_history=extraction_hist,
+            end_to_end_throughput=end_to_end,
         )

@@ -43,6 +43,35 @@ from synchronicity.value_chain import ValueChain, Task, TaskType
 logger = logging.getLogger(__name__)
 
 
+def _softmax_sample(scores: dict[str, float], temperature: float = 1.0) -> str:
+    """Sample a key proportional to exp(score / temperature).
+
+    This is the standard Boltzmann/softmax policy from reinforcement learning.
+    Used by both GreedyAgent and FieldAgent so the selection MECHANISM is
+    identical — only the SCORES differ (raw energy vs. structured field score).
+    """
+    if not scores:
+        raise ValueError("Cannot softmax-sample from empty scores")
+    if len(scores) == 1:
+        return next(iter(scores))
+
+    # Subtract max for numerical stability
+    max_score = max(scores.values())
+    exp_scores = {
+        k: pow(2.718281828, (v - max_score) / temperature)
+        for k, v in scores.items()
+    }
+    total = sum(exp_scores.values())
+
+    r = random.random() * total
+    cumulative = 0.0
+    for key, exp_s in exp_scores.items():
+        cumulative += exp_s
+        if r <= cumulative:
+            return key
+    return next(iter(scores))  # fallback
+
+
 @dataclass
 class AgentCapability:
     """An agent's capability profile.
@@ -162,7 +191,7 @@ class BaseAgent(ABC):
 class GreedyAgent(BaseAgent):
     """Baseline A: pure self-interest, no strategic reasoning.
 
-    Always picks the task with the highest current energy allocation.
+    Samples tasks proportional to raw energy allocation using softmax.
     No consideration of value chains, downstream effects, or capability fit.
 
     Represents the "invisible hand" — each agent optimizing locally.
@@ -174,26 +203,27 @@ class GreedyAgent(BaseAgent):
         if snap is None:
             return AgentDecision(task_id=None, reasoning="no snapshot")
 
-        # Pick highest-energy task the agent is capable of doing
-        best_task = None
-        best_energy = 0.0
+        # Score = raw energy only. No structure, no competition awareness.
+        scores: dict[str, float] = {}
         for task_id, energy in snap.task_energy.items():
-            if energy <= 0:
+            if energy <= 0.1:
                 continue
             caps = snap.task_capabilities.get(task_id, frozenset())
             if caps and not caps.intersection(self.capability.capabilities):
-                continue  # can't do it
-            if energy > best_energy:
-                best_energy = energy
-                best_task = task_id
+                continue
+            scores[task_id] = energy
 
-        if best_task is None:
+        if not scores:
             return AgentDecision(task_id=None, reasoning="no available tasks")
+
+        # Softmax sampling over raw energy (same selection mechanism as
+        # FieldAgent, but over UNSTRUCTURED scores)
+        best_task = _softmax_sample(scores, temperature=1.0)
 
         return AgentDecision(
             task_id=best_task,
             expected_efficiency=self.capability.base_efficiency,
-            reasoning=f"greedy: highest energy task ({best_energy:.1f})",
+            reasoning=f"greedy: raw energy softmax ({scores[best_task]:.1f})",
         )
 
 
@@ -296,15 +326,24 @@ class FieldAgent(BaseAgent):
     structurally and reason about value chains.
 
     Unlike the greedy agent (which only sees raw energy), the FieldAgent
-    considers:
+    uses three strategic signals that greedy ignores:
 
-    1. Raw energy at the task (immediate incentive)
-    2. Downstream value chain depth (how much the task matters to the system)
-    3. Capability match (how well the agent can do it)
-    4. Competition (how many other agents are likely to pick the same task)
+    1. Competition estimation: The expected value of targeting a task drops
+       as more agents in the same batch can also target it. If 3 laborers
+       all see collect_north with 80 energy, each one's expected payoff is
+       ~27, not 80 — because only one of them will get it. Greedy agents
+       all rush the same task and collide. Field agents spread out.
 
-    This is the core claim: agents navigating the incentive field intelligently
-    achieve near-planner efficiency without centralized control.
+    2. Downstream multiplier: Completing a bridge task unlocks energy
+       downstream. The true value of sorting isn't just its own energy —
+       it's its energy PLUS the downstream energy it propagates to (weighted
+       by coupling coefficients). A greedy agent sees sorting as "just
+       another task." A field agent sees it as a multiplier.
+
+    3. Capability exclusivity: If the agent is one of few who can do a
+       bottleneck task (like sorting, which only specialists can do), the
+       system needs them there. The field agent values tasks higher when
+       fewer competitors can do them.
 
     The scoring function is intentionally transparent and tunable. In a
     full LLM implementation, the agent would reason about these same factors
@@ -315,15 +354,96 @@ class FieldAgent(BaseAgent):
         self,
         capability: AgentCapability,
         chain: ValueChain,
-        downstream_weight: float = 0.3,
-        capability_weight: float = 0.2,
-        competition_penalty: float = 0.1,
+        downstream_weight: float = 0.5,
+        competition_weight: float = 1.0,
+        exclusivity_weight: float = 0.3,
     ):
         super().__init__(capability)
         self.chain = chain
         self.downstream_weight = downstream_weight
-        self.capability_weight = capability_weight
-        self.competition_penalty = competition_penalty
+        self.competition_weight = competition_weight
+        self.exclusivity_weight = exclusivity_weight
+        # Track which agents we've observed (for competition estimation)
+        self._observed_agents: set[str] = set()
+
+    def observe(self, snapshot: FieldSnapshot) -> None:
+        """Track snapshot for decision-making."""
+        self._last_snapshot = snapshot
+
+    def _estimate_competition(
+        self, task_id: str, snapshot: FieldSnapshot
+    ) -> float:
+        """Estimate how many OTHER agents will likely target this task.
+
+        We don't know exactly what other agents will do, but we can estimate
+        based on: how many distinct capability sets could target this task?
+        In a batch of N agents, if K agents have matching capabilities and
+        the task has high energy, expect ~min(K, batch_size) competitors.
+
+        Since the agent doesn't know the exact batch composition, we use a
+        heuristic: tasks with common capabilities (like "labor") face more
+        competition than tasks with rare capabilities (like "sorting").
+
+        Returns: estimated number of competing agents (excluding self).
+        """
+        task_caps = snapshot.task_capabilities.get(task_id, frozenset())
+        if not task_caps:
+            return 0.0  # anyone can do it → high competition, handled below
+
+        # How common are the required capabilities?
+        # We infer this from the task: capabilities that appear on many tasks
+        # are common (labor), capabilities that appear on few tasks are rare
+        # (sorting, processing, sales).
+        cap_frequency: dict[str, int] = {}
+        for tid, caps in snapshot.task_capabilities.items():
+            for cap in caps:
+                cap_frequency[cap] = cap_frequency.get(cap, 0) + 1
+
+        # Average frequency of this task's required capabilities.
+        # High frequency = common skill = many potential competitors.
+        avg_freq = sum(cap_frequency.get(c, 1) for c in task_caps) / len(task_caps)
+        n_tasks = len(snapshot.task_capabilities)
+
+        # Normalize: if the capability appears on most tasks, competition is
+        # high. If it's rare, competition is low.
+        commonness = avg_freq / max(n_tasks, 1)
+        # Scale to an estimated competitor count (heuristic)
+        estimated_competitors = commonness * 4.0  # tuneable scaling
+
+        return estimated_competitors
+
+    def _downstream_energy_potential(
+        self, task_id: str, snapshot: FieldSnapshot
+    ) -> float:
+        """Calculate total downstream energy unlocked by completing this task.
+
+        This is the bridge multiplier: completing sorting doesn't just give
+        you sorting's energy — it propagates energy to compost and recycling,
+        which then feeds market_stall and wholesale. The total downstream
+        potential is the weighted sum of all reachable task energies.
+
+        Uses the transitive closure of the downstream graph (not just immediate
+        children) to capture multi-hop value chains.
+        """
+        # BFS/DFS through downstream graph, accumulating weighted energy
+        visited: set[str] = set()
+        total = 0.0
+        frontier = [(task_id, 1.0)]  # (task_id, accumulated_coupling)
+
+        while frontier:
+            current, coupling = frontier.pop(0)
+            for downstream_id, coeff in snapshot.downstream.get(current, []):
+                if downstream_id in visited:
+                    continue
+                visited.add(downstream_id)
+                accumulated = coupling * coeff
+                downstream_energy = snapshot.task_energy.get(downstream_id, 0.0)
+                total += downstream_energy * accumulated
+                # Add capacity as potential (even if currently empty,
+                # completing this task could fill it)
+                frontier.append((downstream_id, accumulated))
+
+        return total
 
     def decide(self) -> AgentDecision:
         snap = self._last_snapshot
@@ -342,37 +462,47 @@ class FieldAgent(BaseAgent):
             if task_caps and not task_caps.intersection(self.capability.capabilities):
                 continue
 
-            # Factor 1: raw energy (immediate incentive)
-            score = energy
+            # ── Factor 1: Competition-adjusted expected energy ───────
+            # The agent won't get the full energy if other agents are also
+            # targeting this task. Expected value = energy / (1 + competitors)
+            competitors = self._estimate_competition(task_id, snap)
+            expected_energy = energy / (1.0 + competitors * self.competition_weight)
 
-            # Factor 2: downstream value chain depth
-            downstream = snap.downstream.get(task_id, [])
-            chain_depth = len(snap.downstream.get(task_id, []))
-            chain_bonus = chain_depth * self.downstream_weight * 10
-            score += chain_bonus
+            # ── Factor 2: Downstream multiplier ──────────────────────
+            # The true value of this task includes the downstream energy it
+            # unlocks. This is what makes bridge tasks (like sorting) worth
+            # more than their raw energy suggests.
+            downstream_potential = self._downstream_energy_potential(task_id, snap)
+            downstream_bonus = downstream_potential * self.downstream_weight * 0.01
 
-            # Factor 3: capability match (all tasks that pass the filter
-            # have at least partial match; exact match gets a bonus)
+            # ── Factor 3: Capability exclusivity ─────────────────────
+            # If few tasks require this agent's capabilities, the agent is
+            # more valuable at this task. A specialist doing sorting (which
+            # only 2 agents can do) is more valuable than a laborer collecting
+            # (which 3 agents can do).
             if task_caps:
-                overlap = len(task_caps.intersection(self.capability.capabilities))
-                match = overlap / len(task_caps)
-                cap_bonus = match * self.capability_weight * 50
-                score += cap_bonus
+                exclusivity = 1.0 / len(task_caps)  # simpler requirement = less exclusive
             else:
-                cap_bonus = 0
+                exclusivity = 0.5  # no requirements = anyone can do it
+            exclusivity_bonus = (1.0 - exclusivity) * self.exclusivity_weight * 20
+
+            score = expected_energy + downstream_bonus + exclusivity_bonus
 
             scores[task_id] = score
             reasoning_parts[task_id] = (
-                f"E={energy:.1f} + chain_depth={chain_depth}"
-                f" + cap_match={cap_bonus:.1f}"
+                f"E={energy:.0f}→exp={expected_energy:.1f}"
+                f" + downstream={downstream_bonus:.1f}"
+                f" + excl={exclusivity_bonus:.1f}"
                 f" = {score:.1f}"
             )
 
         if not scores:
             return AgentDecision(task_id=None, reasoning="no viable tasks")
 
-        # Pick the best-scored task
-        best_task = max(scores, key=scores.get)
+        # Softmax sampling over STRUCTURED scores. Same selection mechanism as
+        # GreedyAgent, but the scores encode competition-adjusted expected
+        # energy, downstream multiplier, and capability exclusivity.
+        best_task = _softmax_sample(scores, temperature=1.0)
 
         return AgentDecision(
             task_id=best_task,
