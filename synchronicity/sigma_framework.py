@@ -173,14 +173,16 @@ class SigmaTracker:
         """Update the cross-entropy estimate from an observed outcome.
 
         The agent's cross-entropy H(p,q) reflects how much it "pays" to
-        complete the task. A successful, efficient completion means low
-        cross-entropy (high σ). A failure means high cross-entropy (low σ).
+        complete the task. This implements BOTH halves of the dual effect:
 
-        We estimate H(p,q) as:
-            H(p,q)_observed = H(p) / observed_efficiency
+        1. Outcome feedback (§1): failures raise H(p,q), successes lower it.
+        2. Expertise accumulation (§5 dual effect): each successful completion
+           reduces H(p,q) slightly — the agent learns the task structure
+           through practice. This is the "information raises the mechanism"
+           half that was missing. It creates a positive feedback loop:
+           doing work → higher σ → more angel injection → more work available.
 
-        Where observed_efficiency accounts for both success/failure and
-        the quality of execution.
+        The expertise rate controls how fast agents improve with practice.
         """
         complexity = self.task_complexities.get(task_id)
         if complexity is None:
@@ -190,28 +192,41 @@ class SigmaTracker:
         if h_p <= 0.001:
             return
 
+        # ── Outcome feedback ─────────────────────────────────────
         # Observed effective efficiency: 0 for failure, `efficiency` for success
         observed_eff = efficiency if success else 0.0
 
         # Convert to cross-entropy: H(p,q) = H(p) / σ_observed
-        # But σ_observed = 0 for failures → H(p,q) = infinity → clamp
         if observed_eff > 0.01:
             observed_h_pq = h_p / observed_eff
         else:
-            observed_h_pq = h_p * 10  # severe penalty: very high cross-entropy
+            observed_h_pq = h_p * 10  # severe penalty
 
-        # Exponential moving average update
+        # ── Expertise accumulation (the dual effect) ─────────────
+        # Each successful completion permanently reduces H(p,q) by a small
+        # fraction. This represents the agent learning the task's structure
+        # through practice — paying fewer bits each time.
+        #
+        # The expertise rate is the fractional reduction in H(p,q) per
+        # successful completion. At 0.02, an agent that does a task 50 times
+        # reduces its H(p,q) by ~1-(0.98^50) = 64%.
+        expertise_rate = 0.02
+
         agent_ce = self._cross_entropy[agent_id]
         old_h_pq = agent_ce.get(task_id)
 
         if old_h_pq is None:
             # First observation — initialize from prior
             prior_h_pq = h_p / self.prior_sigma
-            new_h_pq = prior_h_pq + self.learning_rate * (observed_h_pq - prior_h_pq)
+            outcome_update = prior_h_pq + self.learning_rate * (observed_h_pq - prior_h_pq)
         else:
-            new_h_pq = old_h_pq + self.learning_rate * (observed_h_pq - old_h_pq)
+            outcome_update = old_h_pq + self.learning_rate * (observed_h_pq - old_h_pq)
 
-        agent_ce[task_id] = max(h_p, new_h_pq)  # H(p,q) ≥ H(p) always
+        # Apply expertise accumulation: successful work reduces H(p,q)
+        if success:
+            outcome_update *= (1.0 - expertise_rate)
+
+        agent_ce[task_id] = max(h_p * 0.5, outcome_update)  # floor at H(p)/2 (σ max ≈ 2.0 → clamp later)
         self._observations[agent_id][task_id] += 1
 
     def chain_sigma(
